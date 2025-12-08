@@ -101,6 +101,8 @@ int main(void) {
     char line[MAX_LINE];
     char *tokens[MAX_ARGS];
     char *argv[MAX_ARGS];
+    char history[MAX_LINE] = {0};
+    int has_history = 0;
     int should_run = 1;
 
     while (should_run) {
@@ -116,13 +118,36 @@ int main(void) {
         if (trimmed[0] == '\0')
             continue;
 
+        char *command_to_run = NULL;
+
+        /* Comando para sair do shell */
         if (strcmp(trimmed, "exit") == 0) {
             should_run = 0;
             continue;
         }
 
+        /* Comando de histórico: executa o último comando (!!) */
+        if (strcmp(trimmed, "!!") == 0) {
+            if (!has_history) {
+                printf("Nenhum comando no histórico\n");
+                fflush(stdout);
+                continue;
+            }
+
+            command_to_run = history;
+            /* Mostra comando recente do histórico */
+            printf("%s\n", command_to_run);
+            fflush(stdout);
+        } else {
+            /* Se não for !! ele executa o que foi digitado como comando */
+            strncpy(history, trimmed, MAX_LINE);
+            history[MAX_LINE - 1] = '\0';
+            has_history = 1;
+            command_to_run = trimmed;
+        }
+
         char line_copy[MAX_LINE];
-        strncpy(line_copy, trimmed, MAX_LINE);
+        strncpy(line_copy, command_to_run, MAX_LINE);
         
         line_copy[MAX_LINE - 1] = '\0';
 
