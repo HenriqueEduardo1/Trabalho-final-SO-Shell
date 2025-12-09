@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <fcntl.h> // Necessário para open()
 
 #define MAX_LINE 80
 #define MAX_ARGS ((MAX_LINE / 2) + 1)
@@ -156,7 +157,114 @@ int main(void) {
         if (ntok == 0)
             continue;
 
-        construir_argv(tokens, 0, ntok, argv);
+
+        /* Verificar execução em background (&) */
+        int background = 0;
+        if (ntok > 0 && strcmp(tokens[ntok - 1], "&") == 0) {
+            background = 1;
+            ntok--; /* Ignora o & na lista de argumentos */
+        }
+
+        /* Verificar Pipe (|) */
+        int pipe_idx = -1;
+        for (int i = 0; i < ntok; i++) {
+            if (strcmp(tokens[i], "|") == 0) {
+                pipe_idx = i;
+                break;
+            }
+        }
+
+        if (pipe_idx != -1) {
+            /* PONTO 2: Comunicação via pipe */
+            int fd[2];
+            if (pipe(fd) == -1) {
+                perror("pipe");
+                continue;
+            }
+
+            char *argv1[MAX_ARGS];
+            char *argv2[MAX_ARGS];
+
+            /* Constrói argumentos para o primeiro e segundo comando */
+            construir_argv(tokens, 0, pipe_idx, argv1);
+            construir_argv(tokens, pipe_idx + 1, ntok, argv2);
+
+            pid_t p1 = fork();
+            if (p1 < 0) {
+                perror("fork (p1)");
+                close(fd[0]); close(fd[1]);
+                continue;
+            }
+
+            if (p1 == 0) {
+                /* Filho 1: Redireciona stdout para o pipe */
+                close(fd[0]); /* Fecha leitura */
+                if (dup2(fd[1], STDOUT_FILENO) == -1) {
+                    perror("dup2 p1");
+                    exit(EXIT_FAILURE);
+                }
+                close(fd[1]); /* Fecha escrita após dup */
+                exec_command(argv1);
+            }
+
+            pid_t p2 = fork();
+            if (p2 < 0) {
+                perror("fork (p2)");
+                /* O p1 já está rodando, precisamos limpar */
+                close(fd[0]); close(fd[1]);
+                wait(NULL); 
+                continue;
+            }
+
+            if (p2 == 0) {
+                /* Filho 2: Redireciona stdin do pipe */
+                close(fd[1]); /* Fecha escrita */
+                if (dup2(fd[0], STDIN_FILENO) == -1) {
+                    perror("dup2 p2");
+                    exit(EXIT_FAILURE);
+                }
+                close(fd[0]); /* Fecha leitura após dup */
+                exec_command(argv2);
+            }
+
+            /* Pai: fecha pipes e aguarda filhos */
+            close(fd[0]);
+            close(fd[1]);
+
+            if (!background) {
+                wait(NULL);
+                wait(NULL);
+            }
+            
+            /* Pula o restante do loop, pois o pipe já foi tratado */
+            continue;
+        }
+
+        /* Verificar Redirecionamento (> ou <) */
+        int redirect_out = 0;
+        int redirect_in = 0;
+        char *io_file = NULL;
+        int args_end = ntok; /* Onde termina os argumentos do comando */
+
+        for (int i = 0; i < ntok; i++) {
+            if (strcmp(tokens[i], ">") == 0) {
+                redirect_out = 1;
+                args_end = i;
+                if (i + 1 < ntok) io_file = tokens[i+1];
+                break;
+            }
+            if (strcmp(tokens[i], "<") == 0) {
+                redirect_in = 1;
+                args_end = i;
+                if (i + 1 < ntok) io_file = tokens[i+1];
+                break;
+            }
+        }
+
+        /* Constrói argv considerando possível corte no redirecionamento */
+        construir_argv(tokens, 0, args_end, argv);
+
+        /* --- FIM DA IMPLEMENTAÇÃO DA LÓGICA DE PARSING --- */
 
         pid_t pid = fork();
 
@@ -164,9 +272,39 @@ int main(void) {
             perror("fork");
             continue;
         } else if (pid == 0) {
+            /* PONTO 1: Redirecionamento no processo filho */
+            if (redirect_out) {
+                if (!io_file) {
+                    fprintf(stderr, "osh: erro de sintaxe, arquivo de saida faltando\n");
+                    exit(EXIT_FAILURE);
+                }
+                int fd = open(io_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd < 0) {
+                    perror("open output");
+                    exit(EXIT_FAILURE);
+                }
+                dup2(fd, STDOUT_FILENO);
+                close(fd);
+            } else if (redirect_in) {
+                if (!io_file) {
+                    fprintf(stderr, "osh: erro de sintaxe, arquivo de entrada faltando\n");
+                    exit(EXIT_FAILURE);
+                }
+                int fd = open(io_file, O_RDONLY);
+                if (fd < 0) {
+                    perror("open input");
+                    exit(EXIT_FAILURE);
+                }
+                dup2(fd, STDIN_FILENO);
+                close(fd);
+            }
+
             exec_command(argv);
         } else {
-            wait(NULL);
+            /* Pai espera, a menos que seja background */
+            if (!background) {
+                wait(NULL);
+            }
         }
     }
 
